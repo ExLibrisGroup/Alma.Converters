@@ -29,7 +29,8 @@ $barcodeStatusTypes = [
     '3' => 'STOLEN',
     '4' => 'EXPIRED',
     '5' => 'OTHER',
-    'DEFAULT' => 'INVALID'
+    'DEFAULT' => 'INVALID',
+    ' ' => 'INVALID'
 ];
 // this should match one of the codes from the codetable for UserEmailTypes
 // .../almaws/v1/conf/code-tables/UserEmailTypes
@@ -39,3 +40,13 @@ $defaultEmailType = "ALL";
 // this should match one of the codes from the codetable for NoteTypes
 // .../almaws/v1/conf/code-tables/NoteTypes
 $userNoteType = "ALL";
+
+// needs to be mapped to code from the codetable
+// /almaws/v1/conf/code-tables/UserIdentifierTypes
+$userIdentifierIDType = "BARCODE";
+
+// status
+// Status of user account. Possible codes are listed in 'Content Structure Status'
+// [code table|https://developers.exlibrisgroup.com/blog/Working-with-the-code-tables-API].
+// Default is ACTIVE.
+$userStatus = "ACTIVE";
