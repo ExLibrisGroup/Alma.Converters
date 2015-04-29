@@ -1,7 +1,6 @@
 <?php
-include 'conf/voyager_sif_definition.php';
-$codeMapping = 'conf/voy2alma_mapping.php';
-include $codeMapping;
+include './conf/voyager_sif_definition.php';
+include './conf/voy2alma_mapping.php';
 
 /**
  * @param $simpleXmlObject
@@ -15,13 +14,13 @@ function prettyPrint(SimpleXMLElement $simpleXmlObject){
 
     set_error_handler('HandleXmlError');
     //Format XML to save indented tree rather than one line
-    $dom = new DOMDocument('1.0');
+    $dom = new DOMDocument();
     $dom->preserveWhiteSpace = false;
     $dom->formatOutput = true;
     $dom->loadXML($simpleXmlObject->asXML());
     restore_error_handler();
 
-    return $dom->saveXML();
+    return $dom->saveXML($dom->documentElement);
 }
 
 /**
@@ -45,9 +44,10 @@ function HandleXmlError($errno, $errstr, $errfile, $errline)
 
 /**
  * @param $line
+ * @param $lineCount
  * @return bool
  */
-function isValidSIF($line){
+function isValidSIF($line,$lineCount){
     global $baseRecordFieldsLength;
     global $addressRecordFieldsLength;
 
@@ -56,14 +56,14 @@ function isValidSIF($line){
     if( $line !== "") {
         if (strlen($line) < $baseRecordFieldsLength+$addressRecordFieldsLength) {
             // record does not conform to minimum SIF record length
-            print "Record does not have minimum SIF record length of 885. Length of string is " . strlen($line);
+            print "Record ".$lineCount." does not have minimum SIF record length of 885. Length of string is " . strlen($line);
             print ".\n";
         } else {
             // record meets minimum length requirement
             $address_count = substr($line, $baseRecordFieldsLength, 1);
             if (($address_count < 1) or ($address_count > 9)) {
                 // address count is not correct or wrong data type ie record string has address count at wrong offset
-                print "Address count does not conform to rules on base SIF record. Returning null pointer...\n";
+                print "Address count of Record ".$lineCount." does not conform to rules on base SIF record.";
             } else {
                 $valid = true;
             }
@@ -81,6 +81,8 @@ function pc_fixed_width_substr($fields,$data) {
     $r = [];
     $line_pos = 0;
     foreach($fields as $field_name => $field_length) {
+        // rtrim and the conversion to UTF8 are very expensive
+        // most of the CPU time is spent \here
         $fldVal = rtrim(substr($data,$line_pos,$field_length));
         $fldVal = iconv('ISO-8859-1','UTF-8',$fldVal);
         $r[$field_name] = $fldVal;
@@ -123,6 +125,11 @@ function getAddresses($baseRecord,$string)
     return [$baseRecord[0],$line_pos];
 }
 
+/**
+ * @param $baseRecord
+ * @param $string
+ * @return array
+ */
 function getPatronNotes($baseRecord,$string) {
     $line_pos = $baseRecord[1];
     if ($line_pos < strlen($string)) {
@@ -136,18 +143,14 @@ function getPatronNotes($baseRecord,$string) {
 
 /**
  * @param $patronRec
- * @param $users
+ * @param SimpleXMLElement $user
  */
-function convertToAlmaSisXml($patronRec,SimpleXMLElement $users) {
+function convertToAlmaSisXml($patronRec,SimpleXMLElement $user) {
     global $default_patron_purge_date;
     global $default_patron_expiry_date;
     global $userNoteType;
-
-    // TODO: create a sep XML doc and only add it to $users if there are no errors along the way
-    // this way we can reject entries
-
-    // create a new user doc
-    $user = $users->addChild('user');
+    global $userIdentifierIDType;
+    global $userStatus;
 
     // record_type
     // On SIS load, this field is determined according to the SIS profile.
@@ -244,7 +247,7 @@ function convertToAlmaSisXml($patronRec,SimpleXMLElement $users) {
     // Status of user account. Possible codes are listed in 'Content Structure Status'
     // [code table|https://developers.exlibrisgroup.com/blog/Working-with-the-code-tables-API].
     // Default is ACTIVE.
-    $user->addChild('status','ACTIVE');
+    $user->addChild('status',$userStatus);
 
     // contact_info
     // List of the user's contacts information
@@ -259,7 +262,7 @@ function convertToAlmaSisXml($patronRec,SimpleXMLElement $users) {
             $userIdentifier  = $userIdentifiers->addChild('user_identifier');
             // needs to be mapped to code from the codetable
             // /almaws/v1/conf/code-tables/UserIdentifierTypes
-            $userIdentifier->addChild('id_type','BARCODE');
+            $userIdentifier->addChild('id_type',$userIdentifierIDType);
             $userIdentifier->addChild('value',$pbc);
             $userIdentifier->addChild('status',lookupBarcodeStatus($patronRec['barcode_status_'.$i]));
         }
@@ -319,8 +322,10 @@ function lookupAddrType($addrType){
     $addressType = $addressTypes[$addrType];
     return (is_null($addressType)) ? $addrType["DEFAULT"] : $addressType;
 }
+
 /**
  * @param $date
+ * @param $default
  * @return mixed
  */
 function almaDate ($date,$default){
@@ -463,21 +468,183 @@ function addPhone(SimpleXMLElement $phones,$type,$phoneNumber) {
 }
 
 /**
+ * @param $file
+ * @param $lineCount
+ */
+function writeFinalOutputFile($file, $lineCount)
+{
+    // there is no prepend to a file
+    // in order to put a total record count as an attribute of <users>
+    // we must first find out how many users were valid and added to the xml file
+    // that tmp file was created without a root <users> element
+    // so that we could create a final output file with the populated attribute
+    // then read the tempfile back in and write it to the final output
+    echo 'Writing final outputfile.';
+
+    // this is the tempfile xml without a <users> starting root element
+    $tempFilename = $file . '.sis.xml.tmp';
+
+    // this will be our final SIS XML conversion
+    $finalOutputFilename = $file . '.sis.xml';
+
+    // open up the files and get our file pointers
+    // Read
+    $tempFile = fopen($tempFilename, "r");
+    // Write
+    $finalOutputFile = fopen($finalOutputFilename, "w");
+
+    // Now that we know the final record count
+    // 1st line will be
+    fwrite($finalOutputFile, "<users total_record_count=\"" . $lineCount . "\">" . "\r\n");
+
+    // now loop thru the temp file
+    // line by line
+    // and write it back out to the final file
+    while (($line = fgets($tempFile)) !== false) {
+        fwrite($finalOutputFile, $line);
+    }
+
+    // close our files
+    fclose($tempFile);
+    fclose($finalOutputFile);
+
+    // we can delete the tempfile now
+    if(!unlink($tempFilename)) {
+        echo "Error trying to delete temp file ".$tempFilename."\r\n";
+        echo "Please manually delete it."."\r\n";
+    }
+}
+
+/**
+ * @param $file
+ * @param $showPrettyPrint
+ */
+function processInputFile($file, $showPrettyPrint)
+{
+    // keep track of how many valid conversions
+    $outputLineCount = 0;
+
+    // open the SIF file
+    $inputFile = fopen($file, "r");
+    if ($inputFile) {
+
+        // open a tempfile
+        $outputTempFile = fopen($file . '.sis.xml.tmp', "w");
+
+        // Hack to show pretty print xml output
+        // we are not created the entire xml document in memory
+        // as that will consume large amount of RAM for large SIF files
+        // This is the root element
+        if ($showPrettyPrint) {
+            echo "<users>";
+            echo "\r\n";
+        }
+
+        // Read the file line by line
+        while (($line = fgets($inputFile)) !== false) {
+
+            // process the line read and check if it meets the criteria for minimum length for a Patron SIF record
+            if (isValidSIF($line, $outputLineCount)) {
+
+                // The SIF is Valid. Create a data structure of the patron record
+                $patronRec = read_sif($line);
+
+                // create a new user doc
+                // this saves a lot of ram by only creating xml documents at the per user level
+                $user = new SimpleXMLElement("<user></user>");
+
+                // Do the actual conversion from SIF to SIS
+                convertToAlmaSisXml($patronRec, $user);
+
+                // this is a hack that will strip out the xml header
+                // we dont want one for every user
+                $dom = new DOMDocument();
+                $dom->loadXML($user->asXML());
+
+                // now write the sis record out as xml to our tempfile
+                fwrite($outputTempFile, $dom->saveXML($dom->documentElement) . "\r\n");
+
+                // increment our valid record count and display some updated status every 100 records
+                $outputLineCount++;
+                if ($outputLineCount % 100 == 0) {
+                    echo $outputLineCount . ' Records Converted...' . "\r\n";
+                }
+
+                // echo out the xml
+                if ($showPrettyPrint && $outputLineCount <= 10) {
+                    echo prettyPrint($user);
+                    echo "\r\n";
+                }
+                if ($showPrettyPrint && $outputLineCount == 10) {
+                    echo "</users>";
+                    echo "\r\n";
+                }
+            }
+        }
+        fclose($inputFile);
+        fwrite($outputTempFile, "</users>");
+        if ($showPrettyPrint && $outputLineCount <= 10) {
+            echo "</users>";
+            echo "\r\n";
+        }
+        fclose($outputTempFile);
+        echo $outputLineCount . ' Total Records Processed...' . "\r\n";
+
+        writeFinalOutputFile($file, $outputLineCount);
+
+    } else {
+        // error opening the file.
+        echo "error reading file: " . $inputFile. "\r\n";
+    }
+}
+
+function showUsage() {
+    echo '
+    Usage - This is a command line utility to convert a Voyager Patron SIF file in to an Alma SIS V2 XML file
+
+    valid parameters are -f -p -h
+
+    -f      Filename to process
+    -p      In addition to creating the SIS XML file
+            also output the xml to the console in "pretty-print" format (for debugging)
+            ( the script will limit pretty print to the 1st 10 patrons converted)
+    -h      Display the help file
+
+    Examples:
+
+    SIF2SISV2.php -h
+        Displays the helpfile
+
+    SIF2SISV2.php -f /path/to/SIFFile.sif
+        Converts SIFFile.sif to SIFFile.sif.sis.xml
+
+    SIF2SISV2.php -f /path/to/SIFFile.sif -p
+        Converts SIFFile.sif to SIFFile.sif.sis.xml and displays the xml to the console
+
+    SIF2SISV2.php -f /path/to/SIFFile.sif -f /path/to/SIFFile2.sif
+        Converts SIFFile.sif to SIFFile.sif.sis.xml
+        Converts SIFFile.sif to SIFFile2.sif.sis.xml
+
+    ';
+}
+
+/**
  ** MAIN PROGRAM
  **/
 
-// TODO: move to getopts() so that different paramters can be passed in for configuration etc
-
-//array_shift($argv);
-//
-//if (count($argv) == 0) {
-//    $argv[0] = "php://stdin";
-//}
+// get the command line arguments
 $options = getopt("f:ph");
 
 $showPrettyPrint = isset($options['p']);
 $showHelp = isset($options['h']);
+$filesPassed = isset($options['f']);
 
+if (!$filesPassed){
+    echo "Error: I expect files to process"."\r\n";
+    showUsage();
+    die();
+}
+// determine if more than 1 file to process
 if (is_array($options["f"])){
     $files = $options["f"];
 }
@@ -485,30 +652,18 @@ else{
     $files[] = $options["f"];
 }
 
+// Loop thru the input files and do the work
 foreach ($files as $file) {
+    // measure how long it takes to process
+    $startTime = time();
 
-    // Create a new list of users
-    $users = new SimpleXMLElement("<users></users>");
-    $lineCount = 0;
-    $lines = explode("\n", file_get_contents($file, "r"));
-    foreach ($lines as $line) {
-
-        if (isValidSIF($line)) {
-            // For debug output of SIF line
-            //echo($line);
-            //echo("\n");
-            $patronRec = read_sif($line);
-            convertToAlmaSisXml($patronRec,$users);
-            $lineCount++;
-        }
+    // Attempt to open the SIF file
+    if(!file_exists($file)) {
+        echo "Error !!! ".$file." does not exist.";
     }
-    // The total number of users. This can be used when
-    // retrieving the users list using pagination.
-    $users->addAttribute('total_record_count',$lineCount);
-    $users->asXML($file.'.sis.xml');
-
-    // Enable for debugging
-    if ($showPrettyPrint) {
-        echo prettyPrint($users);
+    else {
+        processInputFile($file, $showPrettyPrint);
+        $endTime = time();
+        echo "\r\n".($endTime - $startTime)." seconds to complete". "\r\n" ;
     }
 }
